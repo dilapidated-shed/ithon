@@ -46,10 +46,10 @@ class UnicodeSyntaxTests(unittest.TestCase):
                 self.assertEqual(tree.body[0].target.id, "x")
 
     def test_unicode_arithmetic(self):
-        self.assertEqual(eval("6 × 7"), 42)
-        self.assertEqual(eval("6 • 7"), 42)
-        self.assertEqual(eval("6 · 7"), 42)
-        self.assertEqual(eval("84 ÷ 2"), 42)
+        self.assertEqual(eval(lower_source("6 × 7")), 42)
+        self.assertEqual(eval(lower_source("6 • 7")), 42)
+        self.assertEqual(eval(lower_source("6 · 7")), 42)
+        self.assertEqual(eval(lower_source("84 ÷ 2")), 42)
 
     def test_unicode_lambda_spellings(self):
         ns = self.run_source(
@@ -80,8 +80,9 @@ class UnicodeSyntaxTests(unittest.TestCase):
 
     def test_unicode_multiplication_is_not_unpacking(self):
         with self.assertRaises(SyntaxError):
-            compile("f(×xs)", "<test>", "exec")
+            compile(lower_source("f(×xs)"), "<test>", "exec")
 
+    @unittest.skipUnless(hasattr(token, "LEFT_ASSIGN"), "requires native Ithon tokenizer")
     def test_exact_token_types(self):
         expected = {
             "←": token.LEFT_ASSIGN,

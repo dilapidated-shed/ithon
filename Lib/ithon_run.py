@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import __future__
 import importlib.abc
 import importlib.util
 import os
@@ -34,7 +35,14 @@ class IthonSourceLoader(importlib.abc.SourceLoader):
     ):
         source = data.decode("utf-8")
         tree = check_source(source, path)
-        return compile(tree, path, "exec", dont_inherit=True, optimize=_optimize)
+        return compile(
+            tree,
+            path,
+            "exec",
+            flags=__future__.annotations.compiler_flag,
+            dont_inherit=True,
+            optimize=_optimize,
+        )
 
 
 class IthonFinder(importlib.abc.MetaPathFinder):
@@ -69,7 +77,13 @@ def _install_importer() -> None:
 def _run_source(source: str, filename: str, argv: list[str]) -> None:
     # Check the complete module before executing any top-level statement.
     tree = check_source(source, filename)
-    code = compile(tree, filename, "exec")
+    code = compile(
+        tree,
+        filename,
+        "exec",
+        flags=__future__.annotations.compiler_flag,
+        dont_inherit=True,
+    )
     sys.argv = argv
     if filename not in {"<string>", "<stdin>"}:
         sys.path[0] = os.path.dirname(os.path.abspath(filename))

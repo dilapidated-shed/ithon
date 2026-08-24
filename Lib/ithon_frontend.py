@@ -6,7 +6,9 @@ annotations are deliberately not part of Ithon's typing syntax.
 from __future__ import annotations
 
 import ast
+from io import StringIO
 import re
+import tokenize
 
 from ithon_static import BOOL, STR, Checker, StaticTypeError
 
@@ -35,6 +37,8 @@ def _scan_top_level(text: str, wanted: str) -> int:
         if ch in {"'", '"'}:
             quote = ch
             continue
+        if ch == "#":
+            break
         if ch in "([{":
             stack.append(ch)
             continue
@@ -66,6 +70,8 @@ def _split_top_level(text: str, delimiter: str) -> list[str]:
         if ch in {"'", '"'}:
             quote = ch
             continue
+        if ch == "#":
+            break
         if ch in "([{":
             stack.append(ch)
             continue
@@ -155,7 +161,7 @@ def _lower_function(line: str, filename: str, line_number: int) -> str:
         eq = _scan_top_level(body, "=")
         default = ""
         if eq >= 0:
-            default = body[eq:]
+            default = "=" + body[eq + 1:]
             body = body[:eq].strip()
         lowered = _binding(body, filename, line_number, line)
         if lowered is None:
@@ -196,10 +202,134 @@ def _lower_membership_expression(text: str) -> str:
     return text
 
 
+def _is_lambda_word(tokens: list[tokenize.TokenInfo], index: int) -> bool:
+    """Whether a soft lambda glyph is being used as a keyword, not a name."""
+    for token in tokens[index + 1:]:
+        if token.type in {
+            tokenize.ENCODING,
+            tokenize.INDENT,
+            tokenize.DEDENT,
+            tokenize.NL,
+        }:
+            continue
+        if token.type in {tokenize.NEWLINE, tokenize.ENDMARKER, tokenize.COMMENT}:
+            return False
+        if token.string in {"←", "→", "=", "+", "-", "/", "÷", "×", "•", "·", ")", "]", "}"}:
+            return False
+        return token.type == tokenize.NAME or token.string in {":", "*", "**"}
+    return False
+
+
+def _lower_surface_tokens(text: str) -> str:
+    """Lower parser glyphs without touching strings, comments, or lambda names."""
+    try:
+        tokens = list(tokenize.generate_tokens(StringIO(text).readline))
+    except (IndentationError, tokenize.TokenError):
+        # Physical lines inside a multiline string are completed by the native
+        # parser. They cannot contain executable surface tokens on their own.
+        return text
+
+    line_offsets = [0]
+    for offset, char in enumerate(text):
+        if char == "\n":
+            line_offsets.append(offset + 1)
+
+    def absolute(position: tuple[int, int]) -> int:
+        row, column = position
+        return line_offsets[row - 1] + column
+
+    protected: list[tuple[int, int]] = []
+    for token in tokens:
+        if token.type in {tokenize.STRING, tokenize.COMMENT}:
+            protected.append((absolute(token.start), absolute(token.end)))
+
+    def is_protected(offset: int) -> bool:
+        return any(start <= offset < end for start, end in protected)
+
+    replacements: list[tuple[int, int, str]] = []
+    operator_chars = {"←": "=", "×": "*", "•": "*", "·": "*", "÷": "/"}
+    binary_glyphs = {"×", "•", "·", "÷"}
+    for offset, char in enumerate(text):
+        if char not in operator_chars or is_protected(offset):
+            continue
+        if char in binary_glyphs:
+            line_start = text.rfind("\n", 0, offset) + 1
+            prefix = text[line_start:offset].rstrip()
+            if not prefix or prefix[-1] in "([{,:=←→+-*/%@":
+                continue
+        replacements.append((offset, offset + 1, operator_chars[char]))
+
+    for index, token in enumerate(tokens):
+        replacement = None
+        if token.string in {"λ", "ƒ"} and _is_lambda_word(tokens, index):
+            replacement = "lambda"
+        if replacement is not None:
+            replacements.append((absolute(token.start), absolute(token.end), replacement))
+
+    for start, end, replacement in sorted(replacements, reverse=True):
+        text = text[:start] + replacement + text[end:]
+    return text
+
+
+def _lower_target(
+    text: str,
+    filename: str,
+    line_number: int,
+    line: str,
+) -> tuple[str, bool]:
+    binding = _binding(text, filename, line_number, line)
+    if binding is not None:
+        return binding, True
+    _reject_colon_binding(text.strip(), filename, line_number, line)
+    return _lower_membership_expression(text.strip()), False
+
+
 def _lower_line(line: str, filename: str, line_number: int) -> str:
     stripped = line.lstrip()
     if stripped.startswith("def ") or stripped.startswith("async def "):
         return _lower_function(line, filename, line_number)
+
+    left_parts = _split_top_level(line, "←")
+    if len(left_parts) > 1:
+        indent = line[: len(line) - len(line.lstrip())]
+        targets: list[str] = []
+        annotated = False
+        for raw in left_parts[:-1]:
+            target, is_annotated = _lower_target(
+                raw.strip(), filename, line_number, line
+            )
+            targets.append(target)
+            annotated = annotated or is_annotated
+        if annotated and len(targets) != 1:
+            raise _error(
+                filename,
+                line_number,
+                line,
+                "a typed assignment cannot be chained",
+            )
+        value = _lower_membership_expression(left_parts[-1].strip())
+        return indent + " = ".join(targets) + " = " + value
+
+    right_parts = _split_top_level(line, "→")
+    if len(right_parts) > 1:
+        indent = line[: len(line) - len(line.lstrip())]
+        value = _lower_membership_expression(right_parts[0].strip())
+        targets: list[str] = []
+        annotated = False
+        for raw in right_parts[1:]:
+            target, is_annotated = _lower_target(
+                raw.strip(), filename, line_number, line
+            )
+            targets.append(target)
+            annotated = annotated or is_annotated
+        if annotated and len(targets) != 1:
+            raise _error(
+                filename,
+                line_number,
+                line,
+                "a typed assignment cannot be chained",
+            )
+        return indent + " = ".join(targets) + " = " + value
 
     assignment = _find_assignment(line)
     if assignment is None:
@@ -212,20 +342,12 @@ def _lower_line(line: str, filename: str, line_number: int) -> str:
     pos, op = assignment
     left, right = line[:pos], line[pos + len(op):]
 
-    if op == "→":
-        binding = _binding(right, filename, line_number, line)
-        if binding is not None:
-            indent = left[: len(left) - len(left.lstrip())]
-            value = _lower_membership_expression(left.strip())
-            return f"{indent}{binding} ← {value}"
-        return line[:pos + len(op)] + _lower_membership_expression(right)
-
     binding = _binding(left, filename, line_number, line)
     if binding is not None:
         if op == "=":
             raise _error(filename, line_number, line, "Ithon assignment uses ← or →, not =")
         indent = left[: len(left) - len(left.lstrip())]
-        return f"{indent}{binding} {op} {_lower_membership_expression(right.strip())}"
+        return f"{indent}{binding} = {_lower_membership_expression(right.strip())}"
 
     _reject_colon_binding(left.strip(), filename, line_number, line)
     return line[:pos + len(op)] + _lower_membership_expression(right)
@@ -233,13 +355,27 @@ def _lower_line(line: str, filename: str, line_number: int) -> str:
 
 def lower_source(source: str, filename: str = "<ithon>") -> str:
     """Lower Ithon's membership surface syntax to the existing AST substrate."""
+    multiline_string_lines: set[int] = set()
+    try:
+        tokens = tokenize.generate_tokens(StringIO(source).readline)
+        for token in tokens:
+            if token.type == tokenize.STRING and token.end[0] > token.start[0]:
+                multiline_string_lines.update(
+                    range(token.start[0] + 1, token.end[0] + 1)
+                )
+    except (IndentationError, tokenize.TokenError):
+        pass
+
     lines = source.splitlines(keepends=True)
     out: list[str] = []
     for number, physical in enumerate(lines, 1):
         newline = "\n" if physical.endswith("\n") else ""
         line = physical[:-1] if newline else physical
-        out.append(_lower_line(line, filename, number) + newline)
-    return "".join(out)
+        if number in multiline_string_lines:
+            out.append(line + newline)
+        else:
+            out.append(_lower_line(line, filename, number) + newline)
+    return _lower_surface_tokens("".join(out))
 
 
 class IthonChecker(Checker):
