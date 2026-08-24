@@ -19,10 +19,10 @@ jobs:
         run: ./ithon -c $'x ∈ int ← 21\nprint(x × 2)'
       - name: Run the language and loader tests on host Python
         run: >-
-          python -c 'import sys, unittest;
-          sys.path.append("Lib");
-          names = ["test.test_ithon_static", "test.test_ithon_static_unicode",
-          "test.test_ithon_run", "test.test_ithon_syntax"];
+          python -c 'import sys, unittest, ithon_host;
+          sys.path.insert(0, "Lib/test");
+          names = ["test_ithon_static", "test_ithon_static_unicode",
+          "test_ithon_run", "test_ithon_syntax"];
           suite = unittest.defaultTestLoader.loadTestsFromNames(names);
           result = unittest.TextTestRunner(verbosity=2).run(suite);
           raise SystemExit(not result.wasSuccessful())'
