@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+NATIVE_PYTHON="$ROOT/python"
+
+if [ -n "${ITHON_PYTHON:-}" ]; then
+    exec "$ITHON_PYTHON" "$ROOT/ithon_host.py" "$@"
+fi
+
+if [ -x "$NATIVE_PYTHON" ]; then
+    exec "$NATIVE_PYTHON" "$ROOT/Lib/ithon_run.py" "$@"
+fi
+
+HOST_PYTHON=${PYTHON:-python3}
+if ! command -v "$HOST_PYTHON" >/dev/null 2>&1; then
+    echo "ithon: no native build or host Python was found" >&2
+    exit 127
+fi
+exec "$HOST_PYTHON" "$ROOT/ithon_host.py" "$@"

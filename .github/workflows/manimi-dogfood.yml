@@ -1,0 +1,46 @@
+name: Manimi dogfood
+
+on:
+  push:
+    branches: [feature/manimi-dogfood, feature/manimi-host-runtime]
+  pull_request:
+
+jobs:
+  host-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run checked Ithon without a native build
+        env:
+          ITHON_PYTHON: python
+        run: ./ithon -c $'x ∈ int ← 21\nprint(x × 2)'
+      - name: Run the language and loader tests on host Python
+        run: >-
+          python -c 'import sys, unittest, ithon_host;
+          sys.path.insert(0, "Lib/test");
+          names = ["test_ithon_static", "test_ithon_static_unicode",
+          "test_ithon_run", "test_ithon_syntax"];
+          suite = unittest.defaultTestLoader.loadTestsFromNames(names);
+          result = unittest.TextTestRunner(verbosity=2).run(suite);
+          raise SystemExit(not result.wasSuccessful())'
+
+  focused-ithon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Ithon
+        run: |
+          ./configure --without-ensurepip
+          make -j2
+      - name: Run Ithon language and loader tests
+        run: >-
+          ./python -m unittest
+          test.test_ithon_static
+          test.test_ithon_static_unicode
+          test.test_ithon_run
+          test.test_ithon_syntax
+      - name: Execute membership-typed Ithon
+        run: ./python Lib/ithon_run.py -c $'x ∈ int ← 21\nprint(x × 2)'
