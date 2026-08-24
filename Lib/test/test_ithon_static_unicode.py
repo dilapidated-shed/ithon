@@ -16,8 +16,8 @@ class UnicodeStaticTypingTests(unittest.TestCase):
         check_source("42 → int ∋ x")
 
     def test_membership_lowers_to_one_ast_typing_relation(self):
-        self.assertEqual(lower_source("x ∈ int ← 42"), "x: int ← 42")
-        self.assertEqual(lower_source("int ∋ x ← 42"), "x: int ← 42")
+        self.assertEqual(lower_source("x ∈ int ← 42"), "x: int = 42")
+        self.assertEqual(lower_source("int ∋ x ← 42"), "x: int = 42")
 
     def test_colon_typing_is_rejected(self):
         with self.assertRaisesRegex(StaticTypeError, "uses ∈ or ∋, not :"):
@@ -28,6 +28,12 @@ class UnicodeStaticTypingTests(unittest.TestCase):
             "double ∈ Callable[[int], int] ← λ x: x × 2\n"
             "answer ← double(21)\n"
         )
+
+    def test_multiline_strings_keep_ithon_glyphs_literal(self):
+        source = '"""first line\n← × ÷ λ ƒ\nlast line"""\nvalue ← 6 × 7\n'
+        lowered = lower_source(source)
+        self.assertIn("← × ÷ λ ƒ", lowered)
+        self.assertIn("value = 6 * 7", lowered)
 
 
 if __name__ == "__main__":
