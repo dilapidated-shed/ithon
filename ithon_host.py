@@ -26,8 +26,14 @@ load("ithon_static", ROOT / "Lib" / "ithon_static.py")
 frontend = load("ithon_frontend", ROOT / "Lib" / "ithon_frontend.py")
 runner = load("ithon_run", ROOT / "Lib" / "ithon_run.py")
 
-try:
-    runner.main()
-except frontend.StaticTypeError as exc:
-    sys.stderr.writelines(traceback.format_exception_only(exc))
-    raise SystemExit(1) from None
+
+def main() -> None:
+    try:
+        runner.main()
+    except frontend.StaticTypeError as exc:
+        sys.stderr.writelines(traceback.format_exception_only(exc))
+        raise SystemExit(1) from None
+
+
+if __name__ == "__main__":
+    main()
