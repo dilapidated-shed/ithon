@@ -6,7 +6,10 @@ annotations are deliberately not part of Ithon's typing syntax.
 from __future__ import annotations
 
 import ast
+import hashlib
 from io import StringIO
+import json
+import os
 import re
 import tokenize
 
@@ -152,6 +155,8 @@ def _lower_function(line: str, filename: str, line_number: int) -> str:
         if not raw.strip():
             lowered_params.append(raw)
             continue
+        leading = raw[: len(raw) - len(raw.lstrip())]
+        trailing = raw[len(raw.rstrip()):]
         prefix = ""
         body = raw.strip()
         if body.startswith("**"):
@@ -169,7 +174,7 @@ def _lower_function(line: str, filename: str, line_number: int) -> str:
             lowered = prefix + body
         else:
             lowered = prefix + lowered
-        lowered_params.append(lowered + default)
+        lowered_params.append(leading + lowered + default + trailing)
 
     tail = line[closing + 1:]
     if "->" in tail:
@@ -177,7 +182,7 @@ def _lower_function(line: str, filename: str, line_number: int) -> str:
     arrow = _scan_top_level(tail, "→")
     if arrow >= 0:
         tail = tail[:arrow] + "->" + tail[arrow + 1:]
-    return line[:opening + 1] + ", ".join(lowered_params) + ")" + tail
+    return line[:opening + 1] + ",".join(lowered_params) + ")" + tail
 
 
 def _find_assignment(text: str) -> tuple[int, str] | None:
@@ -368,13 +373,33 @@ def lower_source(source: str, filename: str = "<ithon>") -> str:
 
     lines = source.splitlines(keepends=True)
     out: list[str] = []
-    for number, physical in enumerate(lines, 1):
+    index = 0
+    while index < len(lines):
+        number = index + 1
+        physical = lines[index]
         newline = "\n" if physical.endswith("\n") else ""
         line = physical[:-1] if newline else physical
         if number in multiline_string_lines:
             out.append(line + newline)
-        else:
-            out.append(_lower_line(line, filename, number) + newline)
+            index += 1
+            continue
+
+        stripped = line.lstrip()
+        if stripped.startswith("def ") or stripped.startswith("async def "):
+            opening = line.find("(")
+            if opening >= 0 and _matching_paren(line, opening) < 0:
+                logical = physical
+                while _matching_paren(logical, logical.find("(")) < 0:
+                    index += 1
+                    if index >= len(lines):
+                        break
+                    logical += lines[index]
+                out.append(_lower_function(logical, filename, number))
+                index += 1
+                continue
+
+        out.append(_lower_line(line, filename, number) + newline)
+        index += 1
     return _lower_surface_tokens("".join(out))
 
 
@@ -398,6 +423,16 @@ def check_source(source: str, filename: str = "<ithon>") -> ast.Module:
     tree = ast.parse(lowered, filename=filename, mode="exec")
     checker = IthonChecker(source, filename)
     checker.check(tree)
+    receipt_path = os.environ.get("ITHON_CHECK_RECEIPT")
+    if receipt_path:
+        record = {
+            "schema": "ithon.checked.v1",
+            "filename": filename,
+            "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            "lowered_sha256": hashlib.sha256(lowered.encode("utf-8")).hexdigest(),
+        }
+        with open(receipt_path, "a", encoding="utf-8") as receipt:
+            receipt.write(json.dumps(record, sort_keys=True) + "\n")
     return tree
 
 
