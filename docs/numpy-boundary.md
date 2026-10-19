@@ -15,3 +15,11 @@ The conversation-training consumer explicitly casts numerical buffers and
 checks shapes, finiteness and precision configuration at its runtime boundary.
 This narrow interface enables that consumer without disabling mandatory static
 checking for ordinary Ithon code.
+
+The exact-head host qualifier requires all 46 current control, loader and NumPy
+tests with zero skips. The native interpreter job is separate: its configure
+and build stages receive the qualified absolute ICK compiler explicitly; a
+compiler failure does not trigger an ambient cc retry. Both jobs check out the
+explicit PR head. The host Python implementation substrate remains foreign;
+this change does not claim native tokenizer or physical-device acceptance from
+the host qualifier.
