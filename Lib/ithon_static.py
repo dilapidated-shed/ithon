@@ -76,6 +76,7 @@ class Checker:
         self.filename = filename
         self.scopes: list[dict[str, IType]] = [{}]
         self.returns: list[IType] = []
+        self.loops = 0
         self._install_builtins()
 
     @property
@@ -96,6 +97,10 @@ class Checker:
             "object": IType("type", (OBJECT,)),
             "range": IType("builtin-range"),
             "print": IType("builtin-print"),
+            "len": IType("builtin-len"),
+            "set": IType("builtin-set"),
+            "type": IType("builtin-type"),
+            "__file__": STR,
         })
 
     def lookup(self, name: str) -> IType | None:
@@ -241,8 +246,15 @@ class Checker:
             self.scopes.pop()
             return
         if isinstance(node, ast.Assign):
-            actual = self.infer(node.value)
-            if actual == UNKNOWN:
+            contextual = None
+            if len(node.targets) == 1:
+                target = node.targets[0]
+                if isinstance(target, ast.Name):
+                    contextual = self.lookup(target.id)
+                elif isinstance(target, ast.Subscript):
+                    contextual = self.infer(target)
+            actual = self.infer(node.value, contextual)
+            if actual == UNKNOWN and contextual is None:
                 self.error(node.value, "cannot infer assignment type; add a type annotation")
             for target in node.targets:
                 self.assign(target, actual, node)
@@ -271,8 +283,63 @@ class Checker:
             if item == UNKNOWN:
                 self.error(node.target, "cannot infer loop variable type")
             self.assign(node.target, item, node)
-            for stmt in [*node.body, *node.orelse]:
+            self.loops += 1
+            try:
+                for stmt in [*node.body, *node.orelse]:
+                    self.check_stmt(stmt)
+            finally:
+                self.loops -= 1
+            return
+        if isinstance(node, ast.While):
+            self.infer(node.test)
+            self.loops += 1
+            try:
+                for stmt in [*node.body, *node.orelse]:
+                    self.check_stmt(stmt)
+            finally:
+                self.loops -= 1
+            return
+        if isinstance(node, (ast.Break, ast.Continue)):
+            if not self.loops:
+                self.error(node, "loop control outside a loop")
+            return
+        if isinstance(node, ast.Try):
+            for stmt in node.body:
                 self.check_stmt(stmt)
+            for handler in node.handlers:
+                if handler.type is not None:
+                    self.infer(handler.type)
+                # Exception objects are a foreign runtime boundary. The body
+                # still checks every local call and typed assignment.
+                self.scopes.append({handler.name: OBJECT} if handler.name else {})
+                try:
+                    for stmt in handler.body:
+                        self.check_stmt(stmt)
+                finally:
+                    self.scopes.pop()
+            for stmt in [*node.orelse, *node.finalbody]:
+                self.check_stmt(stmt)
+            return
+        if isinstance(node, ast.With):
+            for item in node.items:
+                context = self.infer(item.context_expr)
+                if item.optional_vars is not None:
+                    # __enter__ belongs to the imported context-manager API;
+                    # its result remains object until a typed foreign call.
+                    self.assign(item.optional_vars, OBJECT, item)
+            for stmt in node.body:
+                self.check_stmt(stmt)
+            return
+        if isinstance(node, ast.Raise):
+            if node.exc is not None:
+                self.infer(node.exc)
+            if node.cause is not None:
+                self.infer(node.cause)
+            return
+        if isinstance(node, ast.Assert):
+            self.infer(node.test)
+            if node.msg is not None:
+                self.infer(node.msg)
             return
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -297,6 +364,9 @@ class Checker:
         self.error(node, f"static typing for {type(node).__name__} is not implemented")
 
     def assign(self, target: ast.AST, typ: IType, node: ast.AST) -> None:
+        if isinstance(target, ast.Subscript):
+            self.require(typ, self.infer(target), node)
+            return
         if not isinstance(target, ast.Name):
             self.error(target, "static assignment currently requires a simple name target")
         existing = self.lookup(target.id)
@@ -323,6 +393,8 @@ class Checker:
             return typ
         if isinstance(node, ast.BinOp):
             left, right = self.infer(node.left), self.infer(node.right)
+            if isinstance(node.op, (ast.BitOr, ast.BitAnd, ast.BitXor, ast.LShift, ast.RShift)) and left == right == INT:
+                return INT
             if isinstance(node.op, ast.Div):
                 if left in _NUMERIC_RANK and right in _NUMERIC_RANK:
                     return COMPLEX if COMPLEX in (left, right) else FLOAT
@@ -334,6 +406,8 @@ class Checker:
             self.error(node, f"operator is not statically defined for {left} and {right}")
         if isinstance(node, ast.UnaryOp):
             operand = self.infer(node.operand)
+            if isinstance(node.op, ast.Not):
+                return BOOL
             if isinstance(node.op, (ast.USub, ast.UAdd)) and operand in _NUMERIC_RANK:
                 return INT if operand == BOOL else operand
             self.error(node, f"unary operator is not statically defined for {operand}")
@@ -357,11 +431,65 @@ class Checker:
             otherwise = self.infer(node.orelse, expected)
             return _union((body, otherwise))
         if isinstance(node, ast.List):
+            if not node.elts and expected == OBJECT:
+                return IType("list", (OBJECT,))
+            if expected is not None and expected.name == "list" and len(expected.args) == 1:
+                for value in node.elts:
+                    self.require(self.infer(value, expected.args[0]), expected.args[0], value)
+                return expected
             if not node.elts:
                 if expected is not None and expected.name == "list" and expected.args:
                     return expected
                 self.error(node, "empty list needs an explicit element type")
             return IType("list", (_union(self.infer(elt) for elt in node.elts),))
+        if isinstance(node, ast.BoolOp):
+            return _union(self.infer(value, expected) for value in node.values)
+        if isinstance(node, ast.Dict):
+            if not node.keys and expected == OBJECT:
+                return IType("dict", (OBJECT, OBJECT))
+            if any(key is None for key in node.keys):
+                self.error(node, "mapping unpacking is not statically supported")
+            if expected is not None and expected.name == "dict" and len(expected.args) == 2:
+                for key, value in zip(node.keys, node.values):
+                    self.require(self.infer(key, expected.args[0]), expected.args[0], key)
+                    self.require(self.infer(value, expected.args[1]), expected.args[1], value)
+                return expected
+            if not node.keys:
+                if expected is not None and expected.name == "dict" and len(expected.args) == 2:
+                    return expected
+                self.error(node, "empty mapping needs explicit key and value types")
+            return IType("dict", (_union(self.infer(key) for key in node.keys),
+                                  _union(self.infer(value) for value in node.values)))
+        if isinstance(node, ast.Tuple):
+            return IType("tuple", tuple(self.infer(value) for value in node.elts))
+        if isinstance(node, ast.Subscript):
+            container = self.infer(node.value)
+            if isinstance(node.slice, ast.Slice):
+                for bound in (node.slice.lower, node.slice.upper, node.slice.step):
+                    if bound is not None:
+                        self.require(self.infer(bound), INT, bound)
+                if container.name in {"list", "tuple", "str", "bytes"}:
+                    return container
+                self.error(node, "slicing needs a typed sequence")
+            index = self.infer(node.slice)
+            if container.name == "dict" and len(container.args) == 2:
+                self.require(index, container.args[0], node.slice)
+                return container.args[1]
+            if container.name in {"list", "tuple", "str", "bytes"}:
+                self.require(index, INT, node.slice)
+                if container == STR:
+                    return STR
+                if container == BYTES:
+                    return INT
+                if container.name == "tuple":
+                    if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, int):
+                        try:
+                            return container.args[node.slice.value]
+                        except IndexError:
+                            self.error(node, "tuple index outside its static shape")
+                    return _union(container.args)
+                return container.args[0]
+            self.error(node, "indexing needs a statically typed mapping or sequence")
         if isinstance(node, ast.Lambda):
             if expected is None or expected.name != "callable" or not expected.args:
                 self.error(node, "lambda needs a contextual Callable[[...], result] type")
@@ -375,6 +503,16 @@ class Checker:
             self.scopes.pop()
             return expected
         if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in {"set", "type"}:
+                if len(node.args) != 1 or node.keywords:
+                    self.error(node, f"{node.func.id} expects one positional argument")
+                self.infer(node.args[0])
+                return IType("set", (OBJECT,)) if node.func.id == "set" else OBJECT
+            if isinstance(node.func, ast.Name) and node.func.id == "len":
+                if len(node.args) != 1 or node.keywords:
+                    self.error(node, "len expects one positional argument")
+                self.infer(node.args[0])
+                return INT
             if isinstance(node.func, ast.Name) and node.func.id == "range":
                 for arg in node.args:
                     self.require(self.infer(arg), INT, arg)
@@ -398,6 +536,8 @@ class Checker:
             if callee.name in {"module", "external"} or callee == UNKNOWN:
                 for arg in node.args:
                     self.infer(arg)
+                for keyword in node.keywords:
+                    self.infer(keyword.value)
                 return UNKNOWN
             self.error(node.func, f"{callee} is not statically callable")
         if isinstance(node, ast.Attribute):

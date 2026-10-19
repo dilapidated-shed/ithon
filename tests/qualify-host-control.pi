@@ -1,0 +1,27 @@
+"""Qualify the supported host frontend; native tokenizer is separate scope."""
+import unittest
+import sys
+import json
+from importlib.util import spec_from_file_location, module_from_spec
+from pathlib import Path
+from builtins import list
+argv ∈ list[str] ← sys.argv
+suite ∈ object ← unittest.TestSuite()
+modules ∈ list[str] ← ["test_ithon_static", "test_ithon_static_unicode", "test_ithon_run", "test_ithon_control"]
+root ∈ str ← str(Path(__file__).resolve().parent.parent)
+def load(name ∈ str, path ∈ str) → object:
+    specification ∈ object ← spec_from_file_location(name, path)
+    module ∈ object ← module_from_spec(specification)
+    sys.modules.__setitem__(name, module)
+    specification.loader.exec_module(module)
+    return module
+for name in modules:
+    module ∈ object ← load(name, root + "/Lib/test/" + name + ".py")
+    suite.addTests(unittest.defaultTestLoader.loadTestsFromModule(module))
+result ∈ object ← unittest.TextTestRunner(verbosity=2).run(suite)
+successful ∈ bool ← result.wasSuccessful()
+skipped ∈ list[object] ← list(result.skipped)
+count ∈ int ← result.testsRun
+status ∈ str ← "PASS" if successful and len(skipped) == 0 and count >= 40 else "FAIL"
+Path(argv[1]).write_text(json.dumps({"status": status, "tests_run": count, "skipped": len(skipped), "scope": "checked-host-control-frontend", "excluded": ["native-tokenizer"]}, sort_keys=True))
+sys.exit(0 if status == "PASS" else 1)
