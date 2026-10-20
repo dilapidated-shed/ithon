@@ -22,3 +22,7 @@ Current native build/execution must pass before merge. The separate successful
 producer job retains its exact runtime-keyed cache; the interpreter job still
 restores and requalifies the same immutable compiler. No failing consumer gate
 is hidden by the producer's success. Physical devices remain NOT_RUN.
+
+The normal publication retains the failed source and exact hosted log above.
+A new source head requires a new native result; the earlier host PASS does not
+clear that result. No force push or source-branch replacement is used.
