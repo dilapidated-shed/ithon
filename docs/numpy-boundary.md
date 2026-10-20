@@ -23,3 +23,11 @@ compiler failure does not trigger an ambient cc retry. Both jobs check out the
 explicit PR head. The host Python implementation substrate remains foreign;
 this change does not claim native tokenizer or physical-device acceptance from
 the host qualifier.
+
+The first actual native ICK attempt compiled the interpreter but failed while
+linking the array extension: its shared-link recipe does not inherit CFLAGS,
+so ICK's unqualified automatic libatomic_asneeded dependency was still added.
+Both compilation and linking now receive the declared runtime/link flags via
+CFLAGS and LDFLAGS. No alternate compiler, disabled extension or skipped test
+is selected. The producer qualification has its own successful job so a later
+interpreter failure does not discard the exact compiler cache.

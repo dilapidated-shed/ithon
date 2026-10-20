@@ -6,8 +6,13 @@ on:
   pull_request:
 
 jobs:
+  qualified-ick:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Qualify and retain the exact compiler before interpreter construction
+        uses: isomorphisms/ai-ci/ick-host@903b2cb27ea572c9c6cb2ffa9f39e0fbf06ec9f8
   host-runtime:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -33,7 +38,8 @@ jobs:
           raise SystemExit(not result.wasSuccessful())'
 
   focused-ithon:
-    runs-on: ubuntu-latest
+    needs: qualified-ick
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -46,6 +52,7 @@ jobs:
         env:
           CC: ${{ steps.ick.outputs.compiler }}
           CFLAGS: -fno-link-libatomic -static-libgcc
+          LDFLAGS: -fno-link-libatomic -static-libgcc
         run: |
           ./configure --without-ensurepip
           make -j2
