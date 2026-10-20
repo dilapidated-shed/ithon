@@ -6,17 +6,27 @@ on:
   pull_request:
 
 jobs:
-  host-runtime:
-    runs-on: ubuntu-latest
+  qualified-ick:
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - name: Qualify and retain the exact compiler before interpreter construction
+        uses: isomorphisms/ai-ci/ick-host@903b2cb27ea572c9c6cb2ffa9f39e0fbf06ec9f8
+  host-runtime:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
       - name: Run checked Ithon without a native build
         env:
           ITHON_PYTHON: python
         run: ./ithon -c $'x ∈ int ← 21\nprint(x × 2)'
+      - name: Qualify all required host control and NumPy boundaries without skips
+        run: ./ithon tests/qualify-host-control.pi host-control-qualification.json
       - name: Run the language and loader tests on host Python
         run: >-
           python -c 'import sys, unittest, ithon_host;
@@ -28,10 +38,21 @@ jobs:
           raise SystemExit(not result.wasSuccessful())'
 
   focused-ithon:
-    runs-on: ubuntu-latest
+    needs: qualified-ick
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Qualify the explicit ICK native compiler
+        id: ick
+        uses: isomorphisms/ai-ci/ick-host@903b2cb27ea572c9c6cb2ffa9f39e0fbf06ec9f8
       - name: Build Ithon
+        env:
+          CC: ${{ steps.ick.outputs.compiler }}
+          CFLAGS: -fno-link-libatomic -static-libgcc
+          LDFLAGS: -fno-link-libatomic -static-libgcc
         run: |
           ./configure --without-ensurepip
           make -j2

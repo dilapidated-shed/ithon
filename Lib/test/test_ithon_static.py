@@ -4,6 +4,43 @@ from ithon_frontend import StaticTypeError, check_source
 
 
 class MandatoryStaticTypingTests(unittest.TestCase):
+    def test_numpy_array_signature_and_operators(self):
+        self.check_ok(
+            "import numpy as np\n"
+            "def scale(values ∈ np.ndarray, multiplier ∈ float) → np.ndarray:\n"
+            "    result ∈ np.ndarray ← values × multiplier\n"
+            "    return result\n"
+            "values ∈ np.ndarray ← np.asarray([1.0, 2.0])\n"
+            "result ∈ np.ndarray ← scale(values, 2.0)\n"
+            "length ∈ int ← result.shape[0]\n"
+            "width ∈ int ← result.ndim\n"
+        )
+
+    def test_numpy_array_rejects_string_arithmetic(self):
+        self.check_bad(
+            "import numpy as np\n"
+            "values ∈ np.ndarray ← np.asarray([1.0])\n"
+            "result ∈ np.ndarray ← values + 'wrong'\n",
+            "operator is not statically defined",
+        )
+
+    def test_numpy_index_expressions_are_checked(self):
+        for index in ("missing", "missing:2", "0, missing"):
+            self.check_bad(
+                "import numpy as np\n"
+                "values ∈ np.ndarray ← np.asarray([1.0])\n"
+                f"result ∈ np.ndarray ← values[{index}]\n",
+                "has no static type",
+            )
+
+    def test_array_rules_do_not_apply_to_another_module(self):
+        self.check_bad(
+            "import other_module as np\n"
+            "values ∈ np.ndarray ← np.asarray([1.0])\n"
+            "result ∈ np.ndarray ← values × 2.0\n",
+            "operator is not statically defined",
+        )
+
     def check_ok(self, source):
         check_source(source)
 

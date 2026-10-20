@@ -85,6 +85,8 @@ class Checker:
 
     def _install_builtins(self) -> None:
         self.scope.update({
+            "__name__": STR,
+            "__file__": STR,
             "None": NONE,
             "True": BOOL,
             "False": BOOL,
@@ -149,6 +151,12 @@ class Checker:
             args = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
             return IType(base, tuple(self.parse_annotation(arg) for arg in args))
         if isinstance(node, ast.Attribute):
+            # A narrow foreign NumPy boundary. Array dtype and shape remain
+            # runtime contracts; no arbitrary external class gets these rules.
+            if isinstance(node.value, ast.Name) and node.attr == "ndarray":
+                imported = self.lookup(node.value.id)
+                if imported == IType("module", (IType("numpy"),)):
+                    return IType("numpy.ndarray")
             return IType(self._annotation_name(node))
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return IType(node.value)
@@ -171,6 +179,11 @@ class Checker:
         raise AssertionError
 
     def check(self, tree: ast.Module) -> None:
+        # Resolve explicitly imported foreign types consistently during the
+        # signature prepass and the subsequent body pass.
+        for statement in tree.body:
+            if isinstance(statement, (ast.Import, ast.ImportFrom)):
+                self.check_stmt(statement)
         # Declare top-level names before bodies so local calls and class annotations
         # have stable types.
         for stmt in tree.body:
@@ -393,6 +406,14 @@ class Checker:
             return typ
         if isinstance(node, ast.BinOp):
             left, right = self.infer(node.left), self.infer(node.right)
+            if IType("numpy.ndarray") in (left, right):
+                other = right if left == IType("numpy.ndarray") else left
+                allowed = isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div,
+                    ast.Pow, ast.FloorDiv, ast.Mod, ast.MatMult, ast.BitAnd,
+                    ast.BitOr, ast.BitXor, ast.LShift, ast.RShift))
+                if allowed and (other in _NUMERIC_RANK or other in {
+                        IType("numpy.ndarray"), UNKNOWN}):
+                    return IType("numpy.ndarray")
             if isinstance(node.op, (ast.BitOr, ast.BitAnd, ast.BitXor, ast.LShift, ast.RShift)) and left == right == INT:
                 return INT
             if isinstance(node.op, ast.Div):
@@ -414,6 +435,10 @@ class Checker:
         if isinstance(node, ast.Compare):
             operands = [node.left, *node.comparators]
             operand_types = [self.infer(operand) for operand in operands]
+            if IType("numpy.ndarray") in operand_types:
+                # NumPy comparisons produce a Boolean array, not a scalar Bool.
+                if all(t in _NUMERIC_RANK or t == IType("numpy.ndarray") for t in operand_types):
+                    return IType("numpy.ndarray")
             for operator, left, right in zip(node.ops, operand_types, operand_types[1:]):
                 if UNKNOWN in {left, right}:
                     self.error(node, "comparison operands need statically known types")
@@ -464,6 +489,24 @@ class Checker:
             return IType("tuple", tuple(self.infer(value) for value in node.elts))
         if isinstance(node, ast.Subscript):
             container = self.infer(node.value)
+            if container == IType("numpy.ndarray"):
+                # Foreign scalar/slice indexing requires an explicit typed
+                # declaration at its next boundary. Runtime validates indices.
+                pending = [node.slice]
+                while pending:
+                    index_node = pending.pop()
+                    if isinstance(index_node, ast.Tuple):
+                        pending.extend(index_node.elts)
+                    elif isinstance(index_node, ast.Slice):
+                        for bound in (index_node.lower, index_node.upper, index_node.step):
+                            if bound is not None:
+                                self.require(self.infer(bound), INT, bound)
+                    else:
+                        self.infer(index_node)
+                return UNKNOWN
+            if container == IType("numpy.shape"):
+                self.require(self.infer(node.slice), INT, node.slice)
+                return INT
             if isinstance(node.slice, ast.Slice):
                 for bound in (node.slice.lower, node.slice.upper, node.slice.step):
                     if bound is not None:
@@ -541,7 +584,14 @@ class Checker:
                 return UNKNOWN
             self.error(node.func, f"{callee} is not statically callable")
         if isinstance(node, ast.Attribute):
-            self.infer(node.value)
+            receiver = self.infer(node.value)
+            if receiver == IType("numpy.ndarray"):
+                if node.attr in {"ndim", "size", "nbytes"}:
+                    return INT
+                if node.attr == "shape":
+                    return IType("numpy.shape")
+                if node.attr == "T":
+                    return receiver
             return UNKNOWN
         self.error(node, f"cannot infer static type of {type(node).__name__}")
         raise AssertionError
